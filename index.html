@@ -464,9 +464,11 @@ async function tryMJPEG(camId) {
 async function tryHLS(camId) {
   return new Promise((resolve) => {
     const vid = document.getElementById(`vid-${camId}`);
+    vid.crossOrigin = 'anonymous';
     let settled = false;
-    const timeout = setTimeout(() => { if (!settled) { settled = true; resolve(false); } }, WEBRTC_TIMEOUT + 4000);
+    const timeout = setTimeout(() => { if (!settled) { settled = true; resolve(false); } }, 15000);
     const hlsUrl = `${getHttpBase()}/api/stream.m3u8?src=${camId}`;
+    console.log(`[HLS] ${camId}: loading ${hlsUrl}`);
 
     // iOS Safari has native HLS support
     if (vid.canPlayType('application/vnd.apple.mpegurl')) {
@@ -478,6 +480,7 @@ async function tryHLS(camId) {
       });
       vid.addEventListener('error', function onErr() {
         vid.removeEventListener('error', onErr);
+        console.warn(`[HLS] ${camId}: native HLS error`, vid.error);
         if (!settled) { settled = true; clearTimeout(timeout); resolve(false); }
       });
       vid.addEventListener('timeupdate', () => updateFrameTime(camId));
@@ -487,11 +490,18 @@ async function tryHLS(camId) {
 
     // Use hls.js for other browsers
     if (typeof Hls !== 'undefined' && Hls.isSupported()) {
-      const hls = new Hls({ enableWorker: true, lowLatencyMode: true });
+      const hls = new Hls({
+        enableWorker: true,
+        lowLatencyMode: true,
+        xhrSetup: function(xhr, url) {
+          xhr.withCredentials = false;
+        }
+      });
       state[camId].hls = hls;
       hls.loadSource(hlsUrl);
       hls.attachMedia(vid);
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        console.log(`[HLS] ${camId}: manifest parsed, starting playback`);
         vid.play().catch(() => {});
       });
       vid.addEventListener('loadeddata', function onLoad() {
@@ -500,8 +510,8 @@ async function tryHLS(camId) {
         if (!settled) { settled = true; clearTimeout(timeout); resolve(true); }
       });
       hls.on(Hls.Events.ERROR, (event, data) => {
+        console.warn(`[HLS] ${camId}: error type=${data.type} details=${data.details} fatal=${data.fatal}`);
         if (data.fatal) {
-          console.warn(`HLS fatal error for ${camId}:`, data.type);
           hls.destroy();
           if (!settled) { settled = true; clearTimeout(timeout); resolve(false); }
         }
@@ -510,8 +520,7 @@ async function tryHLS(camId) {
       return;
     }
 
-    // No HLS support
-    console.warn('HLS not supported on this browser');
+    console.warn('[HLS] Not supported on this browser');
     if (!settled) { settled = true; clearTimeout(timeout); resolve(false); }
   });
 }

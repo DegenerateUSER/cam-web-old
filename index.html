@@ -82,6 +82,9 @@ html,body{height:100%;font-family:'Inter',system-ui,sans-serif;background:var(--
 .fs-video-wrap{width:90vw;height:85vh;position:relative}
 .fs-video-wrap video,.fs-video-wrap img.mjpeg{width:100%;height:100%;object-fit:contain;background:#000}
 .fs-info{position:absolute;top:12px;left:16px;display:flex;gap:8px;align-items:center}
+.stream-select{font-family:'JetBrains Mono',monospace;font-size:11px;padding:4px 8px;border-radius:4px;border:1px solid var(--border);background:var(--surface2);color:var(--text);cursor:pointer;outline:none;appearance:none;-webkit-appearance:none;background-image:url("data:image/svg+xml,%3Csvg width='10' height='6' viewBox='0 0 10 6' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%238888a0' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 6px center;padding-right:22px}
+.stream-select:hover{border-color:#4a4a60}
+.stream-select:focus{border-color:var(--blue)}
 </style>
 </head>
 <body>
@@ -93,6 +96,12 @@ html,body{height:100%;font-family:'Inter',system-ui,sans-serif;background:var(--
   </div>
   <div class="header-right">
     <div class="server-indicator" id="serverBadge"></div>
+    <select class="stream-select" id="streamMethod" title="Stream Method">
+      <option value="auto">AUTO</option>
+      <option value="mjpeg">MJPEG</option>
+      <option value="mse">MSE (MP4)</option>
+      <option value="webrtc">WebRTC</option>
+    </select>
     <div class="header-time" id="headerTime"></div>
     <button class="settings-btn" id="settingsBtn" title="Server Settings">
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>
@@ -449,29 +458,59 @@ async function tryMJPEG(camId) {
   });
 }
 
+function getStreamMethod() {
+  return localStorage.getItem('stream_method') || 'auto';
+}
+
+// Stream method selector
+const streamSelect = document.getElementById('streamMethod');
+streamSelect.value = getStreamMethod();
+streamSelect.addEventListener('change', () => {
+  localStorage.setItem('stream_method', streamSelect.value);
+  CAMERAS.forEach(cam => startStream(cam.id));
+});
+
 async function startStream(camId) {
   cleanup(camId);
   const vid = document.getElementById(`vid-${camId}`);
   vid.style.display = '';
+  const method = getStreamMethod();
 
-  // Try WebRTC
+  if (method === 'mjpeg') {
+    setStatus(camId, 'connecting', 'mjpeg');
+    if (await tryMJPEG(camId)) { setStatus(camId, 'live', 'mjpeg'); return; }
+    cleanup(camId);
+    setStatus(camId, 'error', null);
+    return;
+  }
+  if (method === 'mse') {
+    setStatus(camId, 'connecting', 'mse');
+    if (await tryMSE(camId)) { setStatus(camId, 'live', 'mse'); scheduleAutoCrop(camId); return; }
+    cleanup(camId);
+    setStatus(camId, 'error', null);
+    return;
+  }
+  if (method === 'webrtc') {
+    setStatus(camId, 'connecting', 'webrtc');
+    if (await tryWebRTC(camId)) { setStatus(camId, 'live', 'webrtc'); scheduleAutoCrop(camId); return; }
+    cleanup(camId);
+    setStatus(camId, 'error', null);
+    return;
+  }
+
+  // Auto: MJPEG → MSE → WebRTC
+  setStatus(camId, 'connecting', 'mjpeg');
+  if (await tryMJPEG(camId)) { setStatus(camId, 'live', 'mjpeg'); return; }
+  cleanup(camId); vid.style.display = '';
+
+  setStatus(camId, 'connecting', 'mse');
+  if (await tryMSE(camId)) { setStatus(camId, 'live', 'mse'); scheduleAutoCrop(camId); return; }
+  cleanup(camId); vid.style.display = '';
+
   setStatus(camId, 'connecting', 'webrtc');
   if (await tryWebRTC(camId)) { setStatus(camId, 'live', 'webrtc'); scheduleAutoCrop(camId); return; }
   cleanup(camId);
-  vid.style.display = '';
 
-  // Try MSE
-  setStatus(camId, 'connecting', 'mse');
-  if (await tryMSE(camId)) { setStatus(camId, 'live', 'mse'); scheduleAutoCrop(camId); return; }
-  cleanup(camId);
-  vid.style.display = '';
-
-  // Try MJPEG
-  setStatus(camId, 'connecting', 'mjpeg');
-  if (await tryMJPEG(camId)) { setStatus(camId, 'live', 'mjpeg'); return; }
-  cleanup(camId);
-
-  // All failed
   setStatus(camId, 'error', null);
 }
 

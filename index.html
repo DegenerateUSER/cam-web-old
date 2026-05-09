@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Live Surveillance</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.7/dist/hls.min.js"></script>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 :root{
@@ -98,6 +99,7 @@ html,body{height:100%;font-family:'Inter',system-ui,sans-serif;background:var(--
     <div class="server-indicator" id="serverBadge"></div>
     <select class="stream-select" id="streamMethod" title="Stream Method">
       <option value="auto">AUTO</option>
+      <option value="hls">HLS (m3u8)</option>
       <option value="mjpeg">MJPEG</option>
       <option value="mse">MSE (MP4)</option>
       <option value="webrtc">WebRTC</option>
@@ -348,6 +350,7 @@ setInterval(tickFrameTimes, 1000);
 function cleanup(camId) {
   const s = state[camId];
   if (s.pc) { try { s.pc.close(); } catch(e){} s.pc = null; }
+  if (s.hls) { try { s.hls.destroy(); } catch(e){} s.hls = null; }
   const vid = document.getElementById(`vid-${camId}`);
   vid.srcObject = null;
   vid.src = '';
@@ -458,6 +461,61 @@ async function tryMJPEG(camId) {
   });
 }
 
+async function tryHLS(camId) {
+  return new Promise((resolve) => {
+    const vid = document.getElementById(`vid-${camId}`);
+    let settled = false;
+    const timeout = setTimeout(() => { if (!settled) { settled = true; resolve(false); } }, WEBRTC_TIMEOUT + 4000);
+    const hlsUrl = `${getHttpBase()}/api/stream.m3u8?src=${camId}`;
+
+    // iOS Safari has native HLS support
+    if (vid.canPlayType('application/vnd.apple.mpegurl')) {
+      vid.src = hlsUrl;
+      vid.addEventListener('loadeddata', function onLoad() {
+        vid.removeEventListener('loadeddata', onLoad);
+        updateFrameTime(camId);
+        if (!settled) { settled = true; clearTimeout(timeout); resolve(true); }
+      });
+      vid.addEventListener('error', function onErr() {
+        vid.removeEventListener('error', onErr);
+        if (!settled) { settled = true; clearTimeout(timeout); resolve(false); }
+      });
+      vid.addEventListener('timeupdate', () => updateFrameTime(camId));
+      vid.play().catch(() => {});
+      return;
+    }
+
+    // Use hls.js for other browsers
+    if (typeof Hls !== 'undefined' && Hls.isSupported()) {
+      const hls = new Hls({ enableWorker: true, lowLatencyMode: true });
+      state[camId].hls = hls;
+      hls.loadSource(hlsUrl);
+      hls.attachMedia(vid);
+      hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        vid.play().catch(() => {});
+      });
+      vid.addEventListener('loadeddata', function onLoad() {
+        vid.removeEventListener('loadeddata', onLoad);
+        updateFrameTime(camId);
+        if (!settled) { settled = true; clearTimeout(timeout); resolve(true); }
+      });
+      hls.on(Hls.Events.ERROR, (event, data) => {
+        if (data.fatal) {
+          console.warn(`HLS fatal error for ${camId}:`, data.type);
+          hls.destroy();
+          if (!settled) { settled = true; clearTimeout(timeout); resolve(false); }
+        }
+      });
+      vid.addEventListener('timeupdate', () => updateFrameTime(camId));
+      return;
+    }
+
+    // No HLS support
+    console.warn('HLS not supported on this browser');
+    if (!settled) { settled = true; clearTimeout(timeout); resolve(false); }
+  });
+}
+
 function getStreamMethod() {
   return localStorage.getItem('stream_method') || 'auto';
 }
@@ -476,6 +534,13 @@ async function startStream(camId) {
   vid.style.display = '';
   const method = getStreamMethod();
 
+  if (method === 'hls') {
+    setStatus(camId, 'connecting', 'hls');
+    if (await tryHLS(camId)) { setStatus(camId, 'live', 'hls'); scheduleAutoCrop(camId); return; }
+    cleanup(camId);
+    setStatus(camId, 'error', null);
+    return;
+  }
   if (method === 'mjpeg') {
     setStatus(camId, 'connecting', 'mjpeg');
     if (await tryMJPEG(camId)) { setStatus(camId, 'live', 'mjpeg'); return; }
@@ -498,7 +563,11 @@ async function startStream(camId) {
     return;
   }
 
-  // Auto: MJPEG → MSE → WebRTC
+  // Auto: HLS → MJPEG → MSE → WebRTC
+  setStatus(camId, 'connecting', 'hls');
+  if (await tryHLS(camId)) { setStatus(camId, 'live', 'hls'); scheduleAutoCrop(camId); return; }
+  cleanup(camId); vid.style.display = '';
+
   setStatus(camId, 'connecting', 'mjpeg');
   if (await tryMJPEG(camId)) { setStatus(camId, 'live', 'mjpeg'); return; }
   cleanup(camId); vid.style.display = '';
